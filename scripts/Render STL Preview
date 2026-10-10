@@ -1,0 +1,11 @@
+#!/usr/bin/python3
+import os, pathlib, subprocess, urllib.parse
+paths=os.environ.get('NAUTILUS_SCRIPT_SELECTED_FILE_PATHS','').splitlines()
+if paths:
+    folder=paths[0]
+else:
+    uri=urllib.parse.urlparse(os.environ.get('NAUTILUS_SCRIPT_CURRENT_URI',''))
+    if uri.scheme!='file':raise SystemExit('Select a local folder')
+    folder=urllib.parse.unquote(uri.path)
+if not pathlib.Path(folder).is_dir():raise SystemExit('Select a folder')
+subprocess.Popen([str(pathlib.Path.home()/'.local/bin/stl-folder-preview'),folder],start_new_session=True)
