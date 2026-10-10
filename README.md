@@ -10,22 +10,22 @@ Right click a local folder (or empty space inside it) in GNOME Files and choose 
 - File size limit: 30 MiB by default, adjustable.
 - Triangle limit: 2 million by default; 0 means unlimited. This skips complex meshes rather than simplifying geometry.
 
-Press **Render** to process all `.stl` files directly in that folder, including uppercase extensions. Subfolders are excluded. Settings persist. **Stop** stops after the current file; completed images are kept. Invalid or unreadable models are logged and skipped.
+Press **Render** to process all `.stl` files directly in that folder, including uppercase extensions. Subfolders are excluded. Settings persist. The window closes automatically when rendering succeeds; write/render errors or a stopped batch keep it open. **Stop** stops after the current file; completed images are kept. Invalid or unreadable models are logged and skipped.
 
 ## Cache behavior
 
-PNG images are stored in `$XDG_CACHE_HOME/thumbnails/large` (normally `~/.cache/thumbnails/large`) with URI, modification time, and size metadata for desktop file managers. The app owns an index under its Qt cache directory, normally `~/.cache/JoeMirai/stl-folder-preview/index.json`.
+PNG images are stored in the standard size folders under `$XDG_CACHE_HOME/thumbnails` (normally `~/.cache/thumbnails`): `normal`, `large`, `x-large`, and `xx-large` with uncompressed PNG `tEXt` URI, modification time, and size metadata for desktop file managers. The app owns an index under its Qt cache directory, normally `~/.cache/JoeMirai/stl-folder-preview/index.json`.
 
 Only pressing Render checks the index from previous runs and removes this app's thumbnails whose source files disappeared. Cleanup spans previously rendered folders, but it preserves thumbnails replaced by another app. Opening the window and the sample preview never cleans the cache. There is no timer, service, scheduled task, or background renderer. The small Nautilus extension only supplies a menu item.
 
-Each render regenerates thumbnails with the chosen settings. Files modified during loading are skipped. Concurrent rendering windows are protected by a cache lock. File-manager thumbnails may require reopening the folder, and depend on Files' thumbnail preferences. STL Browser's own private cache is separate.
+Each render regenerates thumbnails with the chosen settings. Files modified during loading are skipped. Concurrent rendering windows are protected by a cache lock. An already open file-manager folder may need a refresh (Ctrl+R), and depend on Files' thumbnail preferences. STL Browser's own private cache is separate.
 
 ## Build
 
 Ubuntu/Debian dependencies:
 
 ```sh
-sudo apt install build-essential cmake qtbase5-dev libqt5opengl5-dev libgl-dev libnautilus-extension-dev pkg-config
+sudo apt install build-essential cmake qtbase5-dev libqt5opengl5-dev libgl-dev libnautilus-extension-dev pkg-config zlib1g-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_NAUTILUS_EXTENSION=ON
 cmake --build build -j2
 ./scripts/install-local.sh
@@ -57,7 +57,15 @@ Run the integration test in a desktop session with OpenGL, or under Xvfb:
 python3 tests/integration.py build/stl-folder-preview
 ```
 
-The test uses temporary configuration and caches, and checks real OpenGL PNG output, thumbnail metadata, size and triangle limits, uppercase extensions, exclusion of subfolders, changed rendering settings, and cleanup only on the next render. It also checks that unrelated cache files survive.
+The test uses temporary configuration and caches, and checks real OpenGL PNG output, PNG CRCs, actual GIO thumbnail validity at every size, size and triangle limits, uppercase extensions, exclusion of subfolders, changed rendering settings, Unicode paths, and cleanup only on the next render. It also checks that unrelated cache files survive.
+
+To test auto-close using a real Render button click:
+
+```sh
+cmake -S . -B build -DBUILD_WINDOW_TEST=ON
+cmake --build build -j2
+./build/window-test
+```
 
 ## Remove
 

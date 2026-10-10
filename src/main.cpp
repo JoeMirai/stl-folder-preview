@@ -4,16 +4,19 @@
 #include <QLockFile>
 #include "canvas.h"
 #include "loader.h"
+#include "thumbnail.h"
 
 class Dialog : public QDialog {
     Canvas *canvas, *target; bool automatic=false; QComboBox *mode, *view, *resolution; QSpinBox *mb, *triangles;
     QPushButton *render, *cancel; QPlainTextEdit *log; QProgressBar *progress;
     QString folder, cache, manifestPath; QStringList files; QJsonObject manifest;
-    Loader *loader=nullptr; int index=0; bool stopped=false, running=false;
+    Loader *loader=nullptr; int index=0; bool stopped=false, running=false; int failures=0;
     QLockFile lock; QSettings settings;
     QString uri(const QString &p) { return QUrl::fromLocalFile(p).toString(QUrl::FullyEncoded); }
     QString key(const QString &p) { return QCryptographicHash::hash(uri(p).toUtf8(), QCryptographicHash::Md5).toHex(); }
-    QString imagePath(const QString &p) { return cache+"/large/"+key(p)+".png"; }
+    QList<QPair<QString,int>> thumbnailBuckets() const {
+        return {{"normal",128},{"large",256},{"x-large",512},{"xx-large",1024}};
+    }
     void appearance() {
         for(Canvas *c:{canvas,target}) {
             c->set_drawMode(static_cast<DrawMode>(mode->currentIndex()));
@@ -24,15 +27,18 @@ class Dialog : public QDialog {
     void persist() {
         for (auto pair : {qMakePair(QString("mode"),mode->currentIndex()),qMakePair(QString("view"),view->currentIndex()),qMakePair(QString("resolution"),resolution->currentIndex()),qMakePair(QString("mb"),mb->value()),qMakePair(QString("triangles"),triangles->value())}) settings.setValue(pair.first,pair.second);
     }
-    void saveManifest() {
-        QSaveFile f(manifestPath); if (!f.open(QIODevice::WriteOnly) || f.write(QJsonDocument(manifest).toJson())<0 || !f.commit()) log->appendPlainText("Could not save cache index.");
+    bool saveManifest() {
+        QSaveFile f(manifestPath);
+        if (!f.open(QIODevice::WriteOnly) || f.write(QJsonDocument(manifest).toJson())<0 || !f.commit()) { log->appendPlainText("Could not save cache index."); return false; }
+        return true;
     }
     void finish() {
-        saveManifest(); lock.unlock(); running=false; render->setEnabled(true); cancel->setEnabled(false);
+        if(!saveManifest()) failures++; lock.unlock(); running=false; render->setEnabled(true); cancel->setEnabled(false);
         mode->setEnabled(true); view->setEnabled(true); resolution->setEnabled(true); mb->setEnabled(true); triangles->setEnabled(true);
         target->clearMesh(); target->hide();
-        log->appendPlainText(stopped ? "Stopped. Completed previews are saved." : "Done. Reopen the folder in Files to see thumbnails.");
-        if(automatic) QCoreApplication::quit();
+        log->appendPlainText(stopped ? "Stopped. Completed previews are saved." : "Done. Thumbnails saved.");
+        if(automatic) QCoreApplication::exit(failures ? 1 : 0);
+        else if(!stopped && !failures) accept();
     }
     void next() {
         if (stopped || index>=files.size()) { finish(); return; }
@@ -55,15 +61,26 @@ class Dialog : public QDialog {
             if(check.size()!=sourceSize || check.lastModified().toMSecsSinceEpoch()!=sourceTime) {delete mesh;log->appendPlainText("Changed while loading; skipped: "+path);return;}
             target->load_mesh(mesh,false); appearance();
             QImage image=target->grabFramebuffer();
-            if(image.isNull()) {log->appendPlainText("Render failed: "+path);return;}
+            if(image.isNull()) {failures++;log->appendPlainText("Render failed: "+path);return;}
             QFileInfo current(path);
             if(!current.exists()) return;
-            image.setText("Thumb::URI",uri(path)); image.setText("Thumb::MTime",QString::number(current.lastModified().toSecsSinceEpoch()));
-            image.setText("Thumb::Size",QString::number(current.size())); image.setText("Software","stl-folder-preview");
-            QSaveFile output(imagePath(path));
-            if(output.open(QIODevice::WriteOnly) && image.save(&output,"PNG") && output.commit()) {
+            const QMap<QString,QString> metadata = {
+                {"Thumb::URI",uri(path)},
+                {"Thumb::MTime",QString::number(current.lastModified().toSecsSinceEpoch())},
+                {"Thumb::Size",QString::number(current.size())},
+                {"Software","stl-folder-preview"}
+            };
+            bool saved=true;
+            for(const auto &bucket:thumbnailBuckets()) {
+                const int size=qMin(bucket.second,image.width());
+                const QByteArray png=thumbnailPng(image.scaled(size,size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation),metadata);
+                QSaveFile output(cache+"/"+bucket.first+"/"+key(path)+".png");
+                if(png.isEmpty() || !output.open(QIODevice::WriteOnly) || output.write(png)!=png.size() || !output.commit()) saved=false;
+            }
+            if(saved) {
                 manifest.insert(path,key(path)); log->appendPlainText("Rendered: "+current.fileName());
-            } else log->appendPlainText("Could not save: "+path);
+            } else {failures++; manifest.insert(path,key(path));log->appendPlainText("Could not save every thumbnail size: "+path);}
+
         });
         auto fail=[this,path]{log->appendPlainText("Invalid or unreadable STL: "+QFileInfo(path).fileName());};
         connect(active,&Loader::error_bad_stl,this,fail); connect(active,&Loader::error_empty_mesh,this,fail); connect(active,&Loader::error_missing_file,this,fail);
@@ -78,13 +95,16 @@ class Dialog : public QDialog {
         int removed=0;
         for(const QString &p:manifest.keys()) if(!QFileInfo::exists(p)) {
             // Only delete our own thumbnail, never an image another app has replaced.
-            QImage reader(imagePath(p));
-            if(reader.text("Software")=="stl-folder-preview" && reader.text("Thumb::URI")==uri(p)) {if(QFile::remove(imagePath(p))) removed++;}
+            for(const auto &bucket:thumbnailBuckets()) {
+                const QString cached=cache+"/"+bucket.first+"/"+key(p)+".png";
+                QImage reader(cached);
+                if(reader.text("Software")=="stl-folder-preview" && reader.text("Thumb::URI")==uri(p)) {if(QFile::remove(cached)) removed++;}
+            }
             manifest.remove(p);
         }
         log->clear(); log->appendPlainText(QString("Removed %1 previews for missing files.").arg(removed));
         files.clear(); for(const QFileInfo &entry:QDir(folder).entryInfoList(QDir::Files,QDir::Name)) if(entry.suffix().compare("stl",Qt::CaseInsensitive)==0) files<<entry.absoluteFilePath();
-        index=0;stopped=false;running=true; progress->setRange(0,files.size());progress->setValue(0);
+        index=0;stopped=false;running=true;failures=0; progress->setRange(0,files.size());progress->setValue(0);
         render->setEnabled(false);cancel->setEnabled(true);mode->setEnabled(false);view->setEnabled(false);resolution->setEnabled(false);mb->setEnabled(false);triangles->setEnabled(false);next();
     }
     void sample() {
@@ -97,7 +117,7 @@ class Dialog : public QDialog {
     }
 public:
     Dialog(QString path,bool autoRender=false):folder(QFileInfo(path).absoluteFilePath()),cache(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation)+"/thumbnails"),manifestPath(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)+"/index.json"),lock(manifestPath+".lock") {
-        QDir().mkpath(QFileInfo(manifestPath).absolutePath());QDir().mkpath(cache+"/large");
+        QDir().mkpath(QFileInfo(manifestPath).absolutePath());for(const auto &bucket:thumbnailBuckets()) QDir().mkpath(cache+"/"+bucket.first);
         automatic=autoRender;
         setWindowTitle("Render STL Preview");resize(560,760);auto *layout=new QVBoxLayout(this);
         auto *label=new QLabel(folder);label->setWordWrap(true);layout->addWidget(label);
